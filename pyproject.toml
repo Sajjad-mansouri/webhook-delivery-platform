@@ -1,0 +1,48 @@
+[project]
+name = "webhook-delivery-platform"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Sajjad Mansouri", email = "s.mansouri4w@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.20.1",
+    "fastapi[standard]>=0.162.0",
+    "psycopg[binary]>=3.3.6",
+]
+
+[project.scripts]
+webhook-delivery-platform = "webhook_delivery_platform:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.1",
+    "ruff>=0.17.3",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",       # pycodestyle errors
+    "F",       # Pyflakes: undefined names and other errors
+    "I",       # Import sorting
+    "UP",      # Modern Python syntax
+    "B",       # Bugbear: common potential bugs
+    "ASYNC",   # Async-specific checks
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
