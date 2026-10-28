@@ -76,8 +76,10 @@ class TestReadinessEndpoint:
         )
 
         response = client.get("/health/ready")
-
         assert response.status_code == 503
         assert response.json() == {
-            "detail": "Database is unavailable",
+            "error": {
+                "code": "service_unavailable",
+                "message": "Service temporarily unavailable.",
+            }
         }

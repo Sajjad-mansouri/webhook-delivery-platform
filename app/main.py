@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from app.config import settings
 from app.db.session import check_database_connection, engine
+from app.errors import register_exception_handlers
 
 
 async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
@@ -17,6 +18,8 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+register_exception_handlers(app)
 
 
 @app.get("/health/live", tags=["Health"])
