@@ -11,7 +11,7 @@ def client() -> Iterator[TestClient]:
         yield test_client
 
 
-class TestHealthEndpoint:
+class TestLivenessEndpoint:
     def test_liveness_returns_successful_response(
         self,
         client: TestClient,
@@ -41,3 +41,43 @@ class TestHealthEndpoint:
         response = client.post("/health/live")
 
         assert response.status_code == 405
+
+
+class TestReadinessEndpoint:
+    def test_readiness_returns_success_when_database_is_available(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def database_is_available() -> bool:
+            return True
+
+        monkeypatch.setattr(
+            "app.main.check_database_connection",
+            database_is_available,
+        )
+
+        response = client.get("/health/ready")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ready"}
+
+    def test_readiness_returns_service_unavailable_when_database_is_unavailable(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def database_is_unavailable() -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "app.main.check_database_connection",
+            database_is_unavailable,
+        )
+
+        response = client.get("/health/ready")
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "Database is unavailable",
+        }
