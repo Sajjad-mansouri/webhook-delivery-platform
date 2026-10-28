@@ -1,10 +1,14 @@
 from collections.abc import AsyncGenerator
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
 
 from app.config import settings
 from app.db.session import check_database_connection, engine
 from app.errors import register_exception_handlers
+from app.models.tenant import Tenant
+from app.schemas.tenant import TenantRead
+from app.security.dependencies import get_current_tenant
 
 
 async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
@@ -36,3 +40,17 @@ async def health_ready() -> dict[str, str]:
         )
 
     return {"status": "ready"}
+
+
+@app.get(
+    "/api/v1/auth/me",
+    response_model=TenantRead,
+    tags=["Authentication"],
+)
+async def read_authenticated_tenant(
+    current_tenant: Annotated[
+        Tenant,
+        Depends(get_current_tenant),
+    ],
+) -> Tenant:
+    return current_tenant
