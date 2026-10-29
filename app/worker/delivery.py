@@ -6,16 +6,33 @@ from app.models.delivery import Delivery
 from app.models.delivery_attempt import DeliveryAttempt
 from app.models.event import Event
 from app.models.webhook_endpoint import WebhookEndpoint
+from app.worker.retry import classify_http_status, next_retry_at
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+MAX_DELIVERY_ATTEMPTS = 8
 
 
 async def execute_delivery(
     session_factory: async_sessionmaker[AsyncSession],
     http_client: httpx.AsyncClient,
     delivery_id: uuid.UUID,
+    lease_token: uuid.UUID,
 ) -> None:
-    # Load the data needed for the network request.
+    """
+    Execute one claimed delivery attempt.
+
+    The worker must supply the lease token returned by the claim operation.
+    The token prevents an old worker from finalizing a job reclaimed by
+    another worker.
+
+    Delivery.attempts is incremented during claiming, and the corresponding
+    DeliveryAttempt row is created in the same claim transaction.
+    """
+
+    # ---------------------------------------------------------------
+    # 1. Load the request data and verify that this worker owns the job.
+    # ---------------------------------------------------------------
     async with session_factory() as db:
         result = await db.execute(
             select(Delivery, Event, WebhookEndpoint)
@@ -26,6 +43,7 @@ async def execute_delivery(
             )
             .where(Delivery.id == delivery_id)
         )
+
         row = result.one_or_none()
 
         if row is None:
@@ -33,20 +51,44 @@ async def execute_delivery(
 
         delivery, event, endpoint = row
 
-        # Do not send a request for a job that is no longer processing.
-        if delivery.status != "processing":
+        if delivery.status != "processing" or delivery.lease_token != lease_token:
+            # The job is no longer owned by this worker.
             return
 
+        # Claiming must increment attempts before execution starts.
+        attempt_number = delivery.attempts
+
+        if attempt_number < 1:
+            raise RuntimeError(f"Delivery {delivery_id} has an invalid attempt count.")
+
+        # Snapshot the data while the session is open. Do not keep a
+        # database transaction or session open during network I/O.
         url = endpoint.url
         event_id = event.id
         event_type = event.event_type
         event_payload = event.payload
-        attempt_number = delivery.attempts + 1
 
-    # The database session is closed before network I/O.
+        attempt_result = await db.execute(
+            select(DeliveryAttempt).where(
+                DeliveryAttempt.delivery_id == delivery_id,
+                DeliveryAttempt.attempt_number == attempt_number,
+            )
+        )
+        attempt_exists = attempt_result.scalar_one_or_none()
+
+        if attempt_exists is None:
+            raise RuntimeError(
+                f"Attempt {attempt_number} for delivery {delivery_id} "
+                "was not created during claiming."
+            )
+
+    # ---------------------------------------------------------------
+    # 2. Send the HTTP request without holding a database transaction.
+    # ---------------------------------------------------------------
     status_code: int | None = None
     error_message: str | None = None
     succeeded = False
+    retryable = False
 
     try:
         response = await http_client.post(
@@ -66,37 +108,80 @@ async def execute_delivery(
         succeeded = 200 <= status_code < 300
 
         if not succeeded:
-            error_message = f"Destination returned HTTP {status_code}."
+            decision = classify_http_status(status_code)
+            retryable = decision.should_retry
+
+            if retryable:
+                error_message = f"Destination returned retryable HTTP {status_code}."
+            else:
+                error_message = f"Destination returned terminal HTTP {status_code}."
 
     except httpx.TimeoutException:
+        retryable = True
         error_message = "Request timed out."
 
     except httpx.RequestError:
+        retryable = True
         error_message = "Network request failed."
 
-    # Record the result in a new short-lived database transaction.
+    # ---------------------------------------------------------------
+    # 3. Finalize atomically, but only if this worker still owns the job.
+    # ---------------------------------------------------------------
     async with session_factory.begin() as db:
         result = await db.execute(
             select(Delivery).where(Delivery.id == delivery_id).with_for_update()
         )
         delivery = result.scalar_one_or_none()
 
-        if delivery is None or delivery.status != "processing":
+        if (
+            delivery is None
+            or delivery.status != "processing"
+            or delivery.lease_token != lease_token
+        ):
+            # The lease expired or the job was reclaimed while the
+            # request was in flight. Do not overwrite the new owner's
+            # state or attempt history.
             return
 
         now = datetime.now(UTC)
 
-        delivery.attempts = attempt_number
-        delivery.locked_until = None
-        delivery.status = "succeeded" if succeeded else "pending"
-
-        db.add(
-            DeliveryAttempt(
-                delivery_id=delivery.id,
-                attempt_number=attempt_number,
-                status_code=status_code,
-                error_message=error_message,
-                outcome="succeeded" if succeeded else "failed",
-                finished_at=now,
+        attempt_result = await db.execute(
+            select(DeliveryAttempt).where(
+                DeliveryAttempt.delivery_id == delivery_id,
+                DeliveryAttempt.attempt_number == attempt_number,
             )
         )
+        attempt = attempt_result.scalar_one_or_none()
+
+        if attempt is None:
+            raise RuntimeError(
+                f"Attempt {attempt_number} for delivery {delivery_id} "
+                "was not found during finalization."
+            )
+
+        # Update the attempt record created when the job was claimed.
+        attempt.status_code = status_code
+        attempt.error_message = error_message
+        attempt.finished_at = now
+
+        if succeeded:
+            attempt.outcome = "succeeded"
+            delivery.status = "succeeded"
+
+        elif retryable and attempt_number < MAX_DELIVERY_ATTEMPTS:
+            attempt.outcome = "failed"
+            delivery.status = "pending"
+            delivery.available_at = next_retry_at(
+                attempt_number,
+                now=now,
+            )
+
+        else:
+            # Either this failure is terminal, or the retry budget
+            # has been exhausted.
+            attempt.outcome = "failed"
+            delivery.status = "failed"
+
+        # Release the lease after finalization.
+        delivery.locked_until = None
+        delivery.lease_token = None
