@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, HTTPException, status
 
 from app.api.v1.endpoints import router as endpoint_router
+from app.api.v1.events import router as event_router
 from app.config import settings
 from app.db.session import check_database_connection, engine
 from app.errors import register_exception_handlers
@@ -26,6 +27,7 @@ app = FastAPI(
 
 register_exception_handlers(app)
 app.include_router(endpoint_router)
+app.include_router(event_router)
 
 
 @app.get("/health/live", tags=["Health"])
