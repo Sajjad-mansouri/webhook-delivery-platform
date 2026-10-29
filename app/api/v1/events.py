@@ -7,8 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.errors import AppError
+from app.models.delivery import Delivery
+from app.models.endpoint_subscription import EndpointSubscription
 from app.models.event import Event
 from app.models.tenant import Tenant
+from app.models.webhook_endpoint import WebhookEndpoint
 from app.schemas.event import EventCreate, EventRead
 from app.security.dependencies import get_current_tenant
 
@@ -43,12 +46,12 @@ async def create_event(
         Header(alias="Idempotency-Key", min_length=1, max_length=255),
     ],
 ) -> Event:
-    statement = select(Event).where(
+    event_statement = select(Event).where(
         Event.tenant_id == tenant.id,
         Event.idempotency_key == idempotency_key,
     )
 
-    result = await db.execute(statement)
+    result = await db.execute(event_statement)
     existing_event = result.scalar_one_or_none()
 
     if existing_event is not None:
@@ -74,20 +77,55 @@ async def create_event(
         idempotency_key=idempotency_key,
     )
 
-    db.add(event)
-
     try:
+        # Persist the event inside the current transaction so its ID
+        # is available before creating delivery jobs.
+        db.add(event)
+        await db.flush()
+
+        # Find active endpoints belonging to this tenant that
+        # subscribe to this event type.
+        subscriptions_statement = (
+            select(EndpointSubscription.endpoint_id)
+            .join(
+                WebhookEndpoint,
+                WebhookEndpoint.id == EndpointSubscription.endpoint_id,
+            )
+            .where(
+                WebhookEndpoint.tenant_id == tenant.id,
+                WebhookEndpoint.is_active.is_(True),
+                EndpointSubscription.event_type == payload.event_type,
+            )
+        )
+
+        subscription_result = await db.execute(subscriptions_statement)
+        endpoint_ids = subscription_result.scalars().all()
+
+        # Create one pending delivery job per matching endpoint.
+        for endpoint_id in endpoint_ids:
+            db.add(
+                Delivery(
+                    event_id=event.id,
+                    endpoint_id=endpoint_id,
+                    status="pending",
+                    attempts=0,
+                )
+            )
+
+        # Commit the event and all initial delivery jobs atomically.
         await db.commit()
+
     except IntegrityError:
-        # Another concurrent request may have inserted this key
-        # after our initial SELECT.
         await db.rollback()
 
-        result = await db.execute(statement)
+        # A concurrent request may have inserted the same
+        # tenant-scoped idempotency key.
+        result = await db.execute(event_statement)
         existing_event = result.scalar_one_or_none()
 
         if existing_event is None:
-            # This was not the expected idempotency race.
+            # The integrity error was caused by something other
+            # than a duplicate event.
             raise
 
         if (
