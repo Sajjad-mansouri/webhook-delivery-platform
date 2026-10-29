@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -6,6 +7,10 @@ from app.models.delivery import Delivery
 from app.models.delivery_attempt import DeliveryAttempt
 from app.models.event import Event
 from app.models.webhook_endpoint import WebhookEndpoint
+from app.security.webhook_signatures import (
+    create_signature_headers,
+    decrypt_signing_secret,
+)
 from app.worker.retry import (
     DEFAULT_MAX_ATTEMPTS,
     classify_http_status,
@@ -26,7 +31,7 @@ async def execute_delivery(
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1.")
 
-    # 1. Load request data and verify lease ownership.
+    # 1. Load the delivery data and verify lease ownership.
     async with session_factory() as db:
         result = await db.execute(
             select(Delivery, Event, WebhookEndpoint)
@@ -52,12 +57,47 @@ async def execute_delivery(
         if attempt_number < 1:
             raise RuntimeError(f"Delivery {delivery_id} has an invalid attempt count.")
 
+        if endpoint.signing_secret_encrypted is None:
+            raise RuntimeError(
+                f"Endpoint {endpoint.id} has no signing secret configured."
+            )
+
+        # Copy the values needed for the request while the session is open.
         url = endpoint.url
         event_id = event.id
         event_type = event.event_type
         event_payload = event.payload
+        encrypted_secret = endpoint.signing_secret_encrypted
 
-    # 2. Perform network I/O without holding a database transaction.
+    # 2. Prepare and sign the exact bytes that will be sent.
+    #
+    # Keep this outside the database session so no transaction is held
+    # open during encryption or network operations.
+    try:
+        signing_secret = decrypt_signing_secret(encrypted_secret)
+    except (ValueError, RuntimeError):
+        # A configuration/decryption failure is not an HTTP delivery
+        # failure. Raise it so the worker can report the operational
+        # problem. The lease recovery mechanism can recover this job.
+        raise
+
+    body = json.dumps(
+        {
+            "id": str(event_id),
+            "event_type": event_type,
+            "payload": event_payload,
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+    signature_headers = create_signature_headers(
+        signing_secret,
+        body,
+    )
+
+    # 3. Perform network I/O without holding a database transaction.
     status_code: int | None = None
     error_message: str | None = None
     succeeded = False
@@ -66,14 +106,11 @@ async def execute_delivery(
     try:
         response = await http_client.post(
             url,
-            json={
-                "id": str(event_id),
-                "event_type": event_type,
-                "payload": event_payload,
-            },
+            content=body,
             headers={
                 "Content-Type": "application/json",
                 "X-HookRelay-Event-ID": str(event_id),
+                **signature_headers,
             },
         )
 
@@ -93,7 +130,7 @@ async def execute_delivery(
         retryable = True
         error_message = "Network request failed."
 
-    # 3. Finalize only if the lease still belongs to this worker.
+    # 4. Finalize only if this worker still owns the lease.
     async with session_factory.begin() as db:
         result = await db.execute(
             select(Delivery).where(Delivery.id == delivery_id).with_for_update()
@@ -105,7 +142,8 @@ async def execute_delivery(
             or delivery.status != "processing"
             or delivery.lease_token != lease_token
         ):
-            # Another worker may have recovered and reclaimed the job.
+            # Another worker may have recovered or reclaimed the delivery.
+            # Never let this stale worker overwrite the current state.
             return
 
         attempt_result = await db.execute(
@@ -122,7 +160,7 @@ async def execute_delivery(
             )
 
         if attempt.outcome != "processing":
-            # Do not overwrite an attempt already finalized by recovery.
+            # Recovery may already have finalized this attempt.
             return
 
         now = datetime.now(UTC)

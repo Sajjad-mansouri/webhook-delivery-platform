@@ -36,6 +36,10 @@ class WebhookEndpoint(Base):
         nullable=False,
     )
 
+    signing_secret_encrypted: Mapped[str] = mapped_column(
+        String(500),
+        nullable=True,
+    )
     description: Mapped[str | None] = mapped_column(
         String(200),
         nullable=True,
