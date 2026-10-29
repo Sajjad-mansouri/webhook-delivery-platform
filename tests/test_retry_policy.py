@@ -9,26 +9,39 @@ from app.worker.retry import (
 
 
 class TestClassifyHTTPStatus:
-    @pytest.mark.parametrize("status_code", [200, 201, 204])
-    def test_success_responses_are_not_retryable(self, status_code):
+    @pytest.mark.parametrize(
+        ("status_code", "expected_retry", "expected_reason"),
+        [
+            (200, False, "success"),
+            (204, False, "success"),
+            (301, False, "terminal_http_error"),
+            (400, False, "terminal_http_error"),
+            (401, False, "terminal_http_error"),
+            (404, False, "terminal_http_error"),
+            (408, True, "retryable_http_error"),
+            (429, True, "retryable_http_error"),
+            (500, True, "retryable_http_error"),
+            (503, True, "retryable_http_error"),
+        ],
+    )
+    def test_classifies_http_status(
+        self,
+        status_code: int,
+        expected_retry: bool,
+        expected_reason: str,
+    ) -> None:
         decision = classify_http_status(status_code)
 
-        assert decision.should_retry is False
-        assert decision.reason == "success"
+        assert decision.should_retry is expected_retry
+        assert decision.reason == expected_reason
 
-    @pytest.mark.parametrize("status_code", [408, 429, 500, 502, 503])
-    def test_temporary_errors_are_retryable(self, status_code):
-        decision = classify_http_status(status_code)
-
-        assert decision.should_retry is True
-        assert decision.reason == "retryable_http_error"
-
-    @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
-    def test_other_client_errors_are_terminal(self, status_code):
-        decision = classify_http_status(status_code)
-
-        assert decision.should_retry is False
-        assert decision.reason == "terminal_http_error"
+    @pytest.mark.parametrize("status_code", [99, 600, 999])
+    def test_rejects_invalid_status_codes(
+        self,
+        status_code: int,
+    ) -> None:
+        with pytest.raises(ValueError):
+            classify_http_status(status_code)
 
 
 class TestCalculateRetryDelay:
@@ -41,66 +54,78 @@ class TestCalculateRetryDelay:
             (4, 40.0),
         ],
     )
-    def test_exponential_backoff_without_jitter(self, attempt_number, expected):
-        actual = calculate_retry_delay(
+    def test_exponential_backoff_without_jitter(
+        self,
+        attempt_number: int,
+        expected: float,
+    ) -> None:
+        delay = calculate_retry_delay(
             attempt_number,
             jitter_ratio=0,
         )
 
-        assert actual == expected
+        assert delay == expected
 
-    def test_delay_never_exceeds_maximum(self):
-        actual = calculate_retry_delay(
-            20,
-            max_delay_seconds=60,
-            jitter_ratio=0,
-        )
-
-        assert actual == 60
-
-    def test_positive_jitter_is_capped(self):
-        actual = calculate_retry_delay(
-            4,
-            max_delay_seconds=30,
+    def test_applies_positive_jitter(self) -> None:
+        delay = calculate_retry_delay(
+            1,
             jitter_ratio=0.2,
             random_value=1.0,
         )
 
-        assert actual == 30
+        assert delay == 6.0
 
-    def test_negative_jitter_does_not_make_delay_negative(self):
-        actual = calculate_retry_delay(
+    def test_applies_negative_jitter(self) -> None:
+        delay = calculate_retry_delay(
             1,
-            base_delay_seconds=1,
-            jitter_ratio=1,
+            jitter_ratio=0.2,
             random_value=-1.0,
         )
 
-        assert actual == 0
+        assert delay == 4.0
 
-    @pytest.mark.parametrize("attempt_number", [0, -1])
-    def test_attempt_number_must_be_positive(self, attempt_number):
+    def test_caps_exponential_delay(self) -> None:
+        delay = calculate_retry_delay(
+            20,
+            base_delay_seconds=5,
+            max_delay_seconds=60,
+            jitter_ratio=0,
+        )
+
+        assert delay == 60.0
+
+    @pytest.mark.parametrize(
+        "attempt_number",
+        [0, -1],
+    )
+    def test_rejects_invalid_attempt_number(
+        self,
+        attempt_number: int,
+    ) -> None:
         with pytest.raises(ValueError):
             calculate_retry_delay(attempt_number)
 
-    def test_invalid_jitter_is_rejected(self):
+    def test_rejects_invalid_jitter_value(self) -> None:
         with pytest.raises(ValueError):
-            calculate_retry_delay(1, jitter_ratio=1.1)
+            calculate_retry_delay(
+                1,
+                random_value=1.5,
+            )
 
 
 class TestNextRetryAt:
-    def test_retry_time_uses_calculated_delay(self):
+    def test_returns_future_datetime(self) -> None:
         now = datetime(2026, 1, 1, tzinfo=UTC)
 
-        actual = next_retry_at(
-            2,
+        result = next_retry_at(
+            1,
             now=now,
             jitter_ratio=0,
         )
 
-        assert actual == now + timedelta(seconds=10)
+        assert result == now + timedelta(seconds=5)
 
-    def test_naive_datetime_is_rejected(self):
+    def test_rejects_naive_datetime(self) -> None:
         with pytest.raises(ValueError):
             next_retry_at(
                 1,

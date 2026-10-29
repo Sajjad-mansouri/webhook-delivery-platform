@@ -82,6 +82,11 @@ class Delivery(Base):
         nullable=True,
     )
 
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+        unique=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

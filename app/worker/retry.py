@@ -2,6 +2,13 @@ import random
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+DEFAULT_MAX_ATTEMPTS = 8
+DEFAULT_BASE_DELAY_SECONDS = 5.0
+DEFAULT_MAX_DELAY_SECONDS = 3600.0
+DEFAULT_JITTER_RATIO = 0.2
+
+RETRYABLE_STATUS_CODES = {408, 429}
+
 
 @dataclass(frozen=True, slots=True)
 class RetryDecision:
@@ -9,10 +16,10 @@ class RetryDecision:
     reason: str
 
 
-RETRYABLE_STATUS_CODES = {408, 429}
-
-
 def classify_http_status(status_code: int) -> RetryDecision:
+    if not 100 <= status_code <= 599:
+        raise ValueError("HTTP status code must be between 100 and 599.")
+
     if 200 <= status_code < 300:
         return RetryDecision(False, "success")
 
@@ -25,58 +32,53 @@ def classify_http_status(status_code: int) -> RetryDecision:
 def calculate_retry_delay(
     attempt_number: int,
     *,
-    base_delay_seconds: float = 5.0,
-    max_delay_seconds: float = 3600.0,
-    jitter_ratio: float = 0.2,
+    base_delay_seconds: float = DEFAULT_BASE_DELAY_SECONDS,
+    max_delay_seconds: float = DEFAULT_MAX_DELAY_SECONDS,
+    jitter_ratio: float = DEFAULT_JITTER_RATIO,
     random_value: float | None = None,
 ) -> float:
-    """Calculate capped exponential backoff with bounded jitter."""
     if attempt_number < 1:
-        raise ValueError("attempt_number must be at least 1")
+        raise ValueError("attempt_number must be at least 1.")
 
     if base_delay_seconds <= 0:
-        raise ValueError("base_delay_seconds must be positive")
+        raise ValueError("base_delay_seconds must be positive.")
 
     if max_delay_seconds <= 0:
-        raise ValueError("max_delay_seconds must be positive")
+        raise ValueError("max_delay_seconds must be positive.")
 
-    if not 0 <= jitter_ratio <= 1:
-        raise ValueError("jitter_ratio must be between 0 and 1")
+    if jitter_ratio < 0 or jitter_ratio > 1:
+        raise ValueError("jitter_ratio must be between 0 and 1.")
 
     if random_value is None:
         random_value = random.uniform(-1.0, 1.0)
 
     if not -1.0 <= random_value <= 1.0:
-        raise ValueError("random_value must be between -1 and 1")
+        raise ValueError("random_value must be between -1 and 1.")
 
     exponential_delay = min(
         max_delay_seconds,
         base_delay_seconds * (2 ** min(attempt_number - 1, 60)),
     )
 
-    jitter = exponential_delay * jitter_ratio * random_value
+    delay = exponential_delay * (1 + jitter_ratio * random_value)
 
-    return max(
-        0.0,
-        min(max_delay_seconds, exponential_delay + jitter),
-    )
+    return max(0.0, min(max_delay_seconds, delay))
 
 
 def next_retry_at(
     attempt_number: int,
     *,
     now: datetime | None = None,
-    base_delay_seconds: float = 5.0,
-    max_delay_seconds: float = 3600.0,
-    jitter_ratio: float = 0.2,
+    base_delay_seconds: float = DEFAULT_BASE_DELAY_SECONDS,
+    max_delay_seconds: float = DEFAULT_MAX_DELAY_SECONDS,
+    jitter_ratio: float = DEFAULT_JITTER_RATIO,
     random_value: float | None = None,
 ) -> datetime:
-    """Return an aware UTC datetime for the next attempt."""
     if now is None:
         now = datetime.now(UTC)
 
-    if now.utcoffset() is None:
-        raise ValueError("now must be timezone-aware")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware.")
 
     delay = calculate_retry_delay(
         attempt_number,
