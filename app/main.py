@@ -10,6 +10,7 @@ from app.api.v1.subscriptions import router as subscription_router
 from app.config import settings
 from app.db.session import check_database_connection, engine
 from app.errors import register_exception_handlers
+from app.middleware.request_size import RequestBodyLimitMiddleware
 from app.models.tenant import Tenant
 from app.schemas.tenant import TenantRead
 from app.security.dependencies import get_current_tenant
@@ -27,6 +28,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=1_048_576,
+)
 register_exception_handlers(app)
 app.include_router(endpoint_router)
 app.include_router(event_router)

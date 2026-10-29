@@ -13,3 +13,9 @@ def generate_api_key() -> str:
 def hash_api_key(api_key: str) -> str:
     """Return the SHA-256 hex digest of an API key."""
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
+def api_key_matches(raw_key: str, expected_hash: str) -> bool:
+    """Compare key digests in constant time."""
+    candidate_hash = hash_api_key(raw_key)
+    return secrets.compare_digest(candidate_hash, expected_hash)
