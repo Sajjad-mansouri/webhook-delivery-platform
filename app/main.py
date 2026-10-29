@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, status
 
+from app.api.v1.deliveries import router as deliveries_router
 from app.api.v1.endpoints import router as endpoint_router
 from app.api.v1.events import router as event_router
 from app.api.v1.subscriptions import router as subscription_router
@@ -30,6 +31,7 @@ register_exception_handlers(app)
 app.include_router(endpoint_router)
 app.include_router(event_router)
 app.include_router(subscription_router)
+app.include_router(deliveries_router)
 
 
 @app.get("/health/live", tags=["Health"])

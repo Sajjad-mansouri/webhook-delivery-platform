@@ -7,8 +7,8 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import settings
 
-SIGNATURE_HEADER = "X-HookRelay-Signature"
-TIMESTAMP_HEADER = "X-HookRelay-Timestamp"
+SIGNATURE_HEADER = "X-HookPlatfom-Signature"
+TIMESTAMP_HEADER = "X-HookPlatfom-Timestamp"
 SIGNATURE_VERSION = "v1"
 
 
