@@ -114,8 +114,8 @@ class TestWebhookSignatures:
             timestamp=1790000000,
         )
 
-        assert headers["X-HookRelay-Timestamp"] == "1790000000"
-        assert headers["X-HookRelay-Signature"].startswith("v1=")
+        assert headers["X-HookPlatfom-Timestamp"] == "1790000000"
+        assert headers["X-HookPlatfom-Signature"].startswith("v1=")
 
     def test_encryption_round_trip(self, monkeypatch):
         from app.config import settings

@@ -13,6 +13,7 @@ from app.models import (
     Tenant,
     WebhookEndpoint,
 )
+from app.security.webhook_signatures import encrypt_signing_secret
 from app.worker.delivery import execute_delivery
 from app.worker.queue import (
     claim_deliveries,
@@ -73,8 +74,10 @@ class DeliveryTestHelpers:
         if status == "processing":
             if attempts < 1:
                 raise ValueError("A processing delivery must have attempts >= 1.")
+
             if lease_token is None:
                 lease_token = uuid.uuid4()
+
             if locked_until is None:
                 locked_until = datetime.now(UTC) + timedelta(seconds=60)
         else:
@@ -89,6 +92,11 @@ class DeliveryTestHelpers:
         endpoint_url = "https://receiver.example/webhooks"
         now = datetime.now(UTC)
 
+        # The worker requires an encrypted signing secret.
+        # encrypt_signing_secret must use the same configured Fernet
+        # key that the worker uses when decrypting this value.
+        signing_secret_encrypted = encrypt_signing_secret("test-signing-secret")
+
         async with session_factory.begin() as session:
             tenant = Tenant(
                 id=tenant_id,
@@ -102,6 +110,7 @@ class DeliveryTestHelpers:
                 url=endpoint_url,
                 description="Test receiver",
                 is_active=True,
+                signing_secret_encrypted=signing_secret_encrypted,
             )
 
             event = Event(
@@ -172,6 +181,7 @@ class DeliveryTestHelpers:
         """SQLite may return naive datetimes for timezone-aware columns."""
         if value.tzinfo is None or value.utcoffset() is None:
             return value.replace(tzinfo=UTC)
+
         return value.astimezone(UTC)
 
 
