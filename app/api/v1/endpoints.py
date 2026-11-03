@@ -120,7 +120,7 @@ async def update_endpoint(
     if "url" in changes:
         if payload.url is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="The url field cannot be null.",
             )
         endpoint.url = str(payload.url)
@@ -131,7 +131,7 @@ async def update_endpoint(
     if "is_active" in changes:
         if payload.is_active is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="The is_active field cannot be null.",
             )
         endpoint.is_active = payload.is_active
